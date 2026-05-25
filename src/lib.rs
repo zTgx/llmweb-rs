@@ -232,6 +232,55 @@ impl LlmWeb {
         let json = self.client.generate_recipe_json(&page, &scheme, &opts).await?;
         ExtractRecipe::from_json(&json)
     }
+
+    // ======================================================================
+    // No-browser: caller already has an HTML string.
+    // Useful when you fetched HTML out-of-band (reqwest, a feed, a test fixture)
+    // and just want LLM extraction without spinning up Chrome.
+    //
+    // `generate` (route A) isn't exposed here because the produced JS expects
+    // a live DOM. Use `*_on_tab` for that path.
+    // ======================================================================
+
+    pub async fn exec_on_html<R>(
+        &self,
+        html: &str,
+        scheme: serde_json::Value,
+        opts: RunOptions,
+    ) -> Result<R>
+    where
+        R: DeserializeOwned + Debug,
+    {
+        let page = preprocess::preprocess_html(html, opts.format)?;
+        let response = self.client.completion(&page, scheme, &opts).await?;
+        Ok(serde_json::from_str(&response)?)
+    }
+
+    pub async fn stream_on_html<R>(
+        &self,
+        html: &str,
+        scheme: serde_json::Value,
+        opts: RunOptions,
+    ) -> Result<PartialStream<R>>
+    where
+        R: DeserializeOwned + Debug + Send + 'static + PartialEq,
+    {
+        let page = preprocess::preprocess_html(html, opts.format)?;
+        let chat = self.client.completion_stream(&page, scheme, &opts).await?;
+        Ok(streaming::partial_stream::<R>(chat))
+    }
+
+    pub async fn generate_recipe_on_html(
+        &self,
+        html: &str,
+        scheme: serde_json::Value,
+        opts: RunOptions,
+    ) -> Result<ExtractRecipe> {
+        guard_codegen_format(opts.format)?;
+        let page = preprocess::preprocess_html(html, opts.format)?;
+        let json = self.client.generate_recipe_json(&page, &scheme, &opts).await?;
+        ExtractRecipe::from_json(&json)
+    }
 }
 
 /// Run a previously-generated JS extractor against a tab the caller has

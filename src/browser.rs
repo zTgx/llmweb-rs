@@ -83,7 +83,7 @@ async fn stealthy_browser() -> Result<Browser> {
 }
 
 async fn browser_launch_options<'a>() -> Result<LaunchOptions<'a>> {
-    let v: Vec<&OsStr> = vec![
+    let mut v: Vec<&OsStr> = vec![
         OsStr::new("--disable-blink-features=AutomationControlled"),
         OsStr::new("--no-sandbox"),
         OsStr::new("--disable-web-security"),
@@ -96,6 +96,21 @@ async fn browser_launch_options<'a>() -> Result<LaunchOptions<'a>> {
         OsStr::new("--disable-infobars"),
         OsStr::new("--no-first-run"),
     ];
+
+    // Respect standard proxy env vars (HTTPS_PROXY / HTTP_PROXY / ALL_PROXY).
+    // `Box::leak` is fine here — launch options are constructed once per
+    // browser instance, not in a loop.
+    if let Some(proxy) = std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("HTTP_PROXY"))
+        .or_else(|_| std::env::var("ALL_PROXY"))
+        .or_else(|_| std::env::var("https_proxy"))
+        .or_else(|_| std::env::var("http_proxy"))
+        .or_else(|_| std::env::var("all_proxy"))
+        .ok()
+    {
+        let arg: &'static str = Box::leak(format!("--proxy-server={proxy}").into_boxed_str());
+        v.push(OsStr::new(arg));
+    }
 
     LaunchOptionsBuilder::default()
         .headless(true)
