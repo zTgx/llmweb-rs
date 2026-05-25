@@ -1,13 +1,20 @@
 {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "by": { "type": "string" },
-            "comments_url": { "type": "string" },
-            "points": { "type": "number" },
-            "title": { "type": "string" }
-        },
-        "required": ["by", "comments_url", "points", "title"]
-    }
+    "type": "object",
+    "properties": {
+        "top": {
+            "type": "array",
+            "description": "Top stories on Hacker News",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title":        { "type": "string" },
+                    "points":       { "type": "number" },
+                    "by":           { "type": "string" },
+                    "comments_url": { "type": "string" }
+                },
+                "required": ["title", "points", "by", "comments_url"]
+            }
+        }
+    },
+    "required": ["top"]
 }

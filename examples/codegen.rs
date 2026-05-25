@@ -12,6 +12,11 @@ struct Story {
     comments_url: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct HnPage {
+    top: Vec<Story>,
+}
+
 #[tokio::main]
 async fn main() {
     let schema_str = include_str!("../schemas/hn_schema.json");
@@ -26,11 +31,10 @@ async fn main() {
         .unwrap();
     println!("--- generated JS ---\n{js}\n--- end ---");
 
-    // (In a real project you'd persist `js` to disk and load it next time.)
     eprintln!("[2/2] replaying the script without any LLM call...");
-    let stories: Vec<Story> = llmweb
+    let page: HnPage = llmweb
         .run_script("https://news.ycombinator.com", &js)
         .await
         .unwrap();
-    println!("{stories:#?}");
+    println!("{:#?}", page.top);
 }

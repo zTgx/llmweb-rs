@@ -4,9 +4,9 @@
 //! feed, a test fixture, or pasted from a debug capture) and just want to run
 //! LLM extraction against it.
 //!
-//! Env config (same as the other custom examples):
+//! Env config (any OpenAI-compatible gateway):
 //!
-//!     export LLM_ENDPOINT="http://your-gateway/v1/"
+//!     export LLM_ENDPOINT="https://your-gateway/v1"
 //!     export LLM_API_KEY="sk-..."
 //!     export LLM_MODEL="your-model"
 //!
@@ -15,9 +15,7 @@
 
 use llmweb::{
     Format, LlmWeb, RunOptions,
-    genai::{
-        AdapterKind, AuthData, Client, Endpoint, ModelIden, ServiceTarget, ServiceTargetResolver,
-    },
+    openai::{Client, OpenAIConfig},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -27,6 +25,14 @@ struct Product {
     name: String,
     price: f32,
     description: Option<String>,
+}
+
+/// OpenAI's strict `json_schema` mode requires the schema root to be an
+/// object — arrays at the root are rejected. We wrap our list in `products`
+/// here so the same code works against strict OpenAI and looser gateways alike.
+#[derive(Debug, Serialize, Deserialize)]
+struct Catalog {
+    products: Vec<Product>,
 }
 
 const HTML: &str = r#"<!doctype html>
@@ -53,51 +59,53 @@ const HTML: &str = r#"<!doctype html>
 
 #[tokio::main]
 async fn main() {
-    // -- LLM config (same pattern as hn_custom / google_custom) --
+    // Pipe library `tracing` output to stderr. Set RUST_LOG to control verbosity:
+    //   RUST_LOG=llmweb=debug cargo run --example inline_html
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let endpoint = std::env::var("LLM_ENDPOINT")
-        .unwrap_or_else(|_| "https://api.deepseek.com/v1/".to_string());
+        .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
     let api_key = std::env::var("LLM_API_KEY").expect("set LLM_API_KEY");
     let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string());
 
-    let endpoint_static: &'static str = Box::leak(endpoint.into_boxed_str());
-
-    let resolver = ServiceTargetResolver::from_resolver_fn(
-        move |t: ServiceTarget| -> Result<ServiceTarget, ::genai::resolver::Error> {
-            Ok(ServiceTarget {
-                endpoint: Endpoint::from_static(endpoint_static),
-                auth: AuthData::from_single(api_key.clone()),
-                model: ModelIden::new(AdapterKind::OpenAI, t.model.model_name),
-            })
-        },
-    );
-
-    let client = Client::builder()
-        .with_service_target_resolver(resolver)
-        .build();
+    let config = OpenAIConfig::new()
+        .with_api_base(&endpoint)
+        .with_api_key(&api_key);
+    let client = Client::with_config(config);
     let llmweb = LlmWeb::with_client(client, &model);
 
     let schema = json!({
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "name":        { "type": "string" },
-                "price":       { "type": "number" },
-                "description": { "type": "string" }
-            },
-            "required": ["name", "price"]
-        }
+        "type": "object",
+        "properties": {
+            "products": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name":        { "type": "string" },
+                        "price":       { "type": "number" },
+                        "description": { "type": "string" }
+                    },
+                    "required": ["name", "price"]
+                }
+            }
+        },
+        "required": ["products"]
     });
 
-    eprintln!("Extracting products from inline HTML via {endpoint_static} ({model})...");
+    eprintln!("Extracting products from inline HTML via {endpoint} ({model})...");
 
-    // No browser, no network fetch — the HTML is right there.
-    let products: Vec<Product> = llmweb
+    let catalog: Catalog = llmweb
         .exec_on_html(
             HTML,
-            schema.clone(),
+            schema,
             RunOptions {
-                // Markdown gives the LLM a cleaner view of structured content.
                 format: Format::Markdown,
                 temperature: Some(0.0),
                 ..Default::default()
@@ -107,29 +115,10 @@ async fn main() {
         .unwrap();
 
     println!("--- LLM extraction ---");
-    for p in &products {
+    for p in &catalog.products {
         println!("  {} — ${:.2}", p.name, p.price);
         if let Some(d) = &p.description {
             println!("      {d}");
         }
-    }
-
-    // Same input, route B: ask the LLM for a CSS-selector recipe ONCE,
-    // then replay it offline against the same HTML (or any other HTML
-    // with the same structure) with zero further LLM calls.
-    eprintln!("\nGenerating a reusable recipe...");
-    let recipe = llmweb
-        .generate_recipe_on_html(HTML, schema, RunOptions::default())
-        .await
-        .unwrap();
-    println!("--- generated recipe ---");
-    println!("{}", serde_json::to_string_pretty(&recipe).unwrap());
-
-    eprintln!("\nReplaying recipe (no LLM call)...");
-    let value = recipe.apply(HTML).unwrap();
-    let replayed: Vec<Product> = serde_json::from_value(value).unwrap();
-    println!("--- recipe replay ---");
-    for p in &replayed {
-        println!("  {} — ${:.2}", p.name, p.price);
     }
 }

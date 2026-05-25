@@ -21,9 +21,7 @@
 
 use llmweb::{
     LlmWeb, RunOptions,
-    genai::{
-        AdapterKind, AuthData, Client, Endpoint, ModelIden, ServiceTarget, ServiceTargetResolver,
-    },
+    openai::{Client, OpenAIConfig},
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,32 +33,26 @@ struct Story {
     comments_url: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct HnPage {
+    top: Vec<Story>,
+}
+
 #[tokio::main]
 async fn main() {
     let endpoint = std::env::var("LLM_ENDPOINT")
-        .unwrap_or_else(|_| "https://api.deepseek.com/v1/".to_string());
+        .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
     let api_key = std::env::var("LLM_API_KEY").expect("set LLM_API_KEY");
-    let model =
-        std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string());
+    let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string());
 
-    let endpoint_static: &'static str = Box::leak(endpoint.into_boxed_str());
-
-    // Route every request through our custom endpoint + key, while keeping
-    // the OpenAI wire format. Any OpenAI-compatible service works.
-    let resolver = ServiceTargetResolver::from_resolver_fn(
-        move |t: ServiceTarget| -> Result<ServiceTarget, ::genai::resolver::Error> {
-            Ok(ServiceTarget {
-                endpoint: Endpoint::from_static(endpoint_static),
-                auth: AuthData::from_single(api_key.clone()),
-                model: ModelIden::new(AdapterKind::OpenAI, t.model.model_name),
-            })
-        },
-    );
-
-    let client = Client::builder()
-        .with_service_target_resolver(resolver)
-        .build();
+    // Any OpenAI-compatible gateway (vLLM, OpenRouter, DeepSeek, Groq, z.ai, ...)
+    // is just a custom base URL away.
+    let config = OpenAIConfig::new()
+        .with_api_base(&endpoint)
+        .with_api_key(&api_key);
+    let client = Client::with_config(config);
     let llmweb = LlmWeb::with_client(client, &model);
+    let endpoint_static: &str = &endpoint;
 
     let schema_str = include_str!("../schemas/hn_schema.json");
     let schema: serde_json::Value = serde_json::from_str(schema_str).unwrap();
@@ -70,7 +62,7 @@ async fn main() {
 
     eprintln!("Extracting stories from {url} via {endpoint_static} ({model})...");
 
-    let stories: Vec<Story> = llmweb
+    let page: HnPage = llmweb
         .exec_with(
             &url,
             schema,
@@ -82,5 +74,5 @@ async fn main() {
         .await
         .unwrap();
 
-    println!("{stories:#?}");
+    println!("{:#?}", page.top);
 }

@@ -16,15 +16,20 @@ pub struct VXNA {
     pub last_replier: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct V2exPage {
+    items: Vec<VXNA>,
+}
+
 #[tokio::main]
 async fn main() {
     let schema_str = include_str!("../schemas/v2ex_schema.json");
     let schema: Value = serde_json::from_str(schema_str).unwrap();
 
-    // The stream yields progressively more-complete partial arrays.
-    // Each tick prints how many items have arrived so far.
+    // The stream yields progressively more-complete partial snapshots of the
+    // wrapper object. `items` starts empty and grows as the LLM streams tokens.
     let mut stream = LlmWeb::new("gemini-2.0-flash")
-        .stream::<Vec<VXNA>>("https://v2ex.com/go/vxna", schema)
+        .stream::<V2exPage>("https://v2ex.com/go/vxna", schema)
         .await
         .unwrap();
 
@@ -32,12 +37,11 @@ async fn main() {
     while let Some(item) = stream.next().await {
         match item {
             Ok(partial) => {
-                if partial.len() != last_len {
-                    eprintln!("got {} items so far", partial.len());
-                    last_len = partial.len();
+                if partial.items.len() != last_len {
+                    eprintln!("got {} items so far", partial.items.len());
+                    last_len = partial.items.len();
                 }
-                // Final snapshot: print full.
-                println!("{partial:#?}");
+                println!("{:#?}", partial.items);
             }
             Err(e) => eprintln!("stream error: {e}"),
         }

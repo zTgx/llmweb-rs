@@ -1,6 +1,6 @@
 //! Incremental JSON streaming.
 //!
-//! `genai` emits raw text chunks as the LLM generates tokens. This module
+//! `async-openai` emits raw text chunks as the LLM generates tokens. This module
 //! turns that token stream into a `Stream<Item = Result<R>>` of progressively
 //! more-complete parsed values.
 //!
@@ -17,19 +17,19 @@
 
 use {
     crate::error::{LlmWebError, Result},
+    async_openai::types::chat::ChatCompletionResponseStream,
     async_stream::try_stream,
     futures::{Stream, StreamExt},
-    genai::chat::{ChatStream, ChatStreamEvent},
     serde::de::DeserializeOwned,
     std::pin::Pin,
 };
 
 pub type PartialStream<R> = Pin<Box<dyn Stream<Item = Result<R>> + Send>>;
 
-/// Wrap a raw genai `ChatStream` into a `Stream<Item = Result<R>>` that yields
-/// a fresh `R` every time the partial buffer grows into something parseable.
-/// Duplicate consecutive snapshots are filtered.
-pub fn partial_stream<R>(mut chat: ChatStream) -> PartialStream<R>
+/// Wrap a raw `ChatCompletionResponseStream` into a `Stream<Item = Result<R>>`
+/// that yields a fresh `R` every time the partial buffer grows into something
+/// parseable. Duplicate consecutive snapshots are filtered.
+pub fn partial_stream<R>(mut chat: ChatCompletionResponseStream) -> PartialStream<R>
 where
     R: DeserializeOwned + Send + 'static + PartialEq,
 {
@@ -37,17 +37,22 @@ where
         let mut buf = String::new();
         let mut last: Option<R> = None;
 
-        while let Some(event) = chat.next().await {
-            let event = event.map_err(|e| LlmWebError::ModelClient(format!("{e}")))?;
-            let chunk = match event {
-                ChatStreamEvent::Chunk(c) => c.content,
-                // Ignore Start / ReasoningChunk / End — only assistant text matters.
-                _ => continue,
+        while let Some(chunk_result) = chat.next().await {
+            let chunk = chunk_result.map_err(|e| LlmWebError::ModelClient(format!("{e}")))?;
+
+            // Each SSE chunk is a CreateChatCompletionStreamResponse; the
+            // assistant text lives in `choices[0].delta.content`.
+            let Some(delta) = chunk
+                .choices
+                .first()
+                .and_then(|c| c.delta.content.as_deref())
+            else {
+                continue;
             };
-            if chunk.is_empty() {
+            if delta.is_empty() {
                 continue;
             }
-            buf.push_str(&chunk);
+            buf.push_str(delta);
 
             let repaired = repair_partial_json(&buf);
             let Ok(value) = serde_json::from_str::<R>(&repaired) else {

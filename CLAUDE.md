@@ -51,13 +51,13 @@ URL ──► LlmWebBrower (headless_chrome) ──► Tab ──┐
   - `Text` — `document.body.innerText` via `tab.evaluate`
   - `Image` — PNG screenshot base64-encoded (sent as `ContentPart::Image` for multimodal models)
 - `src/browser.rs` — stealthy `LlmWebBrower::new()` and `open(url) -> Arc<Tab>`. The free function `evaluate_json(tab, expr)` wraps the JS expression with `JSON.stringify(await (...))` so complex return values come back as a string primitive (CDP's `RemoteObject.value` is only populated for primitives when `returnByValue=false`, which is how the convenience `tab.evaluate` is configured).
-- `src/models.rs` — `LLMClient` wrapping `genai::Client`. Three prompts:
+- `src/models.rs` — `LLMClient` wrapping `async_openai::Client<OpenAIConfig>`. Three prompts:
   - `SYSTEM_PROMPT` — structured extraction (uses `JsonSpec`)
   - `CODEGEN_SYSTEM` — emits JS IIFE (no `JsonSpec` — output is source code)
   - `RECIPE_SYSTEM` — emits a recipe object (uses a meta-`JsonSpec`)
 - `src/codegen.rs` — `run_script_on_tab()` for replaying generated JS against a live tab.
 - `src/recipe.rs` — `ExtractRecipe` / `FieldRule` + pure-Rust executor on top of the `scraper` crate. Supports `attr` = `text` / `html` / any attribute name, and `parse` = `int` / `float` / `int_prefix`.
-- `src/streaming.rs` — `repair_partial_json()` (close open brackets/strings, drop dangling keys, fill colons with `null`) + `partial_stream<R>()` that converts a `genai::ChatStream` into `Pin<Box<dyn Stream<Item = Result<R>>>>`.
+- `src/streaming.rs` — `repair_partial_json()` (close open brackets/strings, drop dangling keys, fill colons with `null`) + `partial_stream<R>()` that converts a `ChatCompletionResponseStream` into `Pin<Box<dyn Stream<Item = Result<R>>>>`.
 - `src/error.rs` — `LlmWebError` enum (`Browser`, `ModelClient`, `SerdeJson`, `Io`, `JsBlocked`, `Preprocess`, `Recipe`).
 - `src/main.rs` — `clap`-based CLI; `--format` maps to `Format`.
 
@@ -96,6 +96,6 @@ cargo clippy -- -D warnings
 - The headless browser launches Chrome via `headless_chrome`; Chrome/Chromium must be on PATH. `--no-sandbox` + `--disable-web-security` are set unconditionally — keep this in mind when running in shared environments.
 - `evaluate_json` wraps every JS expression in `(async () => JSON.stringify(await (EXPR)))()`. The CDP `Evaluate` call uses `returnByValue=false` (hardcoded inside `headless_chrome::Tab::evaluate`), so we always go through the string-primitive escape hatch.
 - `run_recipe` deliberately uses `Format::RawHtml` for the underlying fetch, because the default `Html` mode strips attributes (`href`, `src`, etc.) that recipes typically depend on.
-- The `Image` format sends a base64 screenshot via `genai::ContentPart::from_image_base64`. Providers without multimodal support will return an API error.
+- The `Image` format sends a base64 screenshot as an `image_url` data URL part. Providers without multimodal support will return an API error.
 - `stream` does real incremental parsing: each chunk grows `buf`, `repair_partial_json` produces a syntactically-valid snapshot, `serde_json::from_str::<R>` is attempted, and successful new values are yielded. Snapshots that fail to parse are skipped silently — early ticks of an extraction with non-`Option` required fields won't emit until enough data has arrived.
 - LLM-generated JS runs with full DOM privileges; if you scrape untrusted sites, prefer route B (recipe) which is pure Rust with no eval.

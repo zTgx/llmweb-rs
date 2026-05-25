@@ -1,50 +1,25 @@
 {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "username": {
-                "type": "string",
-                "description": "发布者用户名"
-            },
-            "avatar_url": {
-                "type": "string",
-                "description": "头像URL"
-            },
-            "profile_url": {
-                "type": "string",
-                "description": "个人主页URL"
-            },
-            "title": {
-                "type": "string",
-                "description": "帖子标题"
-            },
-            "topic_url": {
-                "type": "string",
-                "description": "帖子链接"
-            },
-            "topic_id": {
-                "type": "integer",
-                "description": "帖子ID"
-            },
-            "relative_time": {
-                "type": "string",
-                "description": "相对时间描述"
-            },
-            "reply_count": {
-                "type": "integer",
-                "description": "回复数"
-            },
-            "last_replier": {
-                "type": "string",
-                "description": "最后回复者"
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "description": "V2EX topic list entries",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "username":      { "type": "string", "description": "发布者用户名" },
+                    "avatar_url":    { "type": "string", "description": "头像URL" },
+                    "profile_url":   { "type": "string", "description": "个人主页URL" },
+                    "title":         { "type": "string", "description": "帖子标题" },
+                    "topic_url":     { "type": "string", "description": "帖子链接" },
+                    "topic_id":      { "type": "integer", "description": "帖子ID" },
+                    "relative_time": { "type": "string", "description": "相对时间描述" },
+                    "reply_count":   { "type": "integer", "description": "回复数" },
+                    "last_replier":  { "type": "string", "description": "最后回复者" }
+                },
+                "required": ["username", "avatar_url", "title", "topic_url"]
             }
-        },
-        "required": [
-        "username",
-        "avatar_url",
-        "title",
-        "topic_url"
-        ]
-    }
+        }
+    },
+    "required": ["items"]
 }

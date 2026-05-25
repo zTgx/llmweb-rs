@@ -30,35 +30,35 @@ pub use preprocess::{Format, Preprocessed, RunOptions};
 pub use recipe::{ExtractRecipe, FieldRule};
 pub use streaming::PartialStream;
 
-/// Re-exports from `genai` so users can build a custom client without taking
-/// a direct dependency on the crate version.
-pub mod genai {
-    pub use genai::{
-        Client, ClientBuilder, ModelIden, ServiceTarget,
-        adapter::AdapterKind,
-        resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver},
-    };
+/// Re-exports from `async-openai` so users can build a custom client without
+/// taking a direct dependency on the crate version.
+pub mod openai {
+    pub use async_openai::{Client, config::OpenAIConfig};
 }
 
-/// The main client. Holds a `genai` client and the model name used for every call.
+/// The main client. Holds an `async-openai` client and the model name.
 pub struct LlmWeb {
     client: models::LLMClient,
 }
 
 impl LlmWeb {
-    /// Create a client with the default `genai::Client` — relies on the
-    /// usual `*_API_KEY` env vars for auth.
+    /// Create a client using the default config — reads the API key from
+    /// the `OPENAI_API_KEY` env var and hits the official OpenAI endpoint.
+    /// For any other provider (DeepSeek, Groq, z.ai, OpenRouter, Ollama, ...)
+    /// use [`Self::with_client`].
     pub fn new(name: &str) -> Self {
         Self {
             client: models::LLMClient::new(name),
         }
     }
 
-    /// Create a client with a pre-built `genai::Client`. Use this to point
-    /// at a custom endpoint, supply an inline API key, swap adapters, etc.
-    ///
-    /// See `genai::ServiceTargetResolver` for the lower-level knobs.
-    pub fn with_client(client: ::genai::Client, model: &str) -> Self {
+    /// Create a client with a pre-built `async_openai::Client`. Use this to
+    /// point at a custom endpoint, supply an inline API key, etc. Build the
+    /// underlying client with `OpenAIConfig::new().with_api_base(...).with_api_key(...)`.
+    pub fn with_client(
+        client: ::async_openai::Client<::async_openai::config::OpenAIConfig>,
+        model: &str,
+    ) -> Self {
         Self {
             client: models::LLMClient::with_client(client, model),
         }
@@ -314,3 +314,4 @@ fn guard_codegen_format(format: Format) -> Result<()> {
         ))),
     }
 }
+

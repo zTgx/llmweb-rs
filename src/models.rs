@@ -3,14 +3,19 @@ use {
         error::{LlmWebError, Result},
         preprocess::{Format, Preprocessed, RunOptions},
     },
-    genai::{
+    async_openai::{
         Client,
-        chat::{
-            ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, ChatStream, ContentPart,
-            JsonSpec, MessageContent,
+        config::OpenAIConfig,
+        types::chat::{
+            ChatCompletionRequestMessageContentPartImage,
+            ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessageArgs,
+            ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+            ChatCompletionRequestUserMessageContentPart, ChatCompletionResponseStream,
+            CreateChatCompletionRequest, CreateChatCompletionRequestArgs, ImageUrl,
+            ResponseFormat, ResponseFormatJsonSchema,
         },
     },
-    serde_json::{Value, json},
+    serde_json::Value,
 };
 
 pub const SYSTEM_PROMPT: &str = "You are a structured information extraction assistant. Please extract JSON from the HTML page.\nStrictly output the JSON structure as specified above. Use null for missing fields.";
@@ -32,19 +37,19 @@ macro_rules! strip_markdown_backticks {
 }
 
 pub struct LLMClient {
-    client: Client,
+    client: Client<OpenAIConfig>,
     pub model: String,
 }
 
 impl LLMClient {
     pub fn new(model: &str) -> Self {
         Self {
-            client: Client::default(),
+            client: Client::with_config(OpenAIConfig::new()),
             model: model.to_string(),
         }
     }
 
-    pub fn with_client(client: Client, model: &str) -> Self {
+    pub fn with_client(client: Client<OpenAIConfig>, model: &str) -> Self {
         Self {
             client,
             model: model.to_string(),
@@ -58,40 +63,70 @@ impl LLMClient {
         scheme: Value,
         opts: &RunOptions,
     ) -> Result<String> {
-        let chat_opts = base_chat_options(opts).with_response_format(ChatResponseFormat::JsonSpec(
-            JsonSpec::new("LlmWeb", json!(scheme)),
-        ));
-        let chat_req = build_request(page, opts, SYSTEM_PROMPT);
+        let request = build_request(
+            &self.model,
+            page,
+            opts,
+            SYSTEM_PROMPT,
+            Some(&scheme),
+            Some(ResponseFormat::JsonSchema {
+                json_schema: ResponseFormatJsonSchema {
+                    name: "LlmWeb".to_string(),
+                    description: None,
+                    schema: scheme.clone(),
+                    strict: None,
+                },
+            }),
+            false,
+        )?;
 
         let response = self
             .client
-            .exec_chat(&self.model, chat_req, Some(&chat_opts))
+            .chat()
+            .create(request)
             .await
             .map_err(|e| LlmWebError::ModelClient(format!("{e}")))?;
 
-        extract_text(response)
+        let text = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .ok_or_else(|| LlmWebError::ModelClient("no content in response".into()))?;
+
+        tracing::debug!(target: "llmweb::completion", raw = %text, "LLM raw response");
+        Ok(strip_markdown_backticks!(text))
     }
 
-    /// Open a streaming chat that returns text chunks. The caller is
-    /// responsible for accumulating + (partially) parsing the chunks.
+    /// Open a streaming chat. Caller drives the SSE stream and parses chunks.
     pub async fn completion_stream(
         &self,
         page: &Preprocessed,
         scheme: Value,
         opts: &RunOptions,
-    ) -> Result<ChatStream> {
-        let chat_opts = base_chat_options(opts).with_response_format(ChatResponseFormat::JsonSpec(
-            JsonSpec::new("LlmWeb", json!(scheme)),
-        ));
-        let chat_req = build_request(page, opts, SYSTEM_PROMPT);
+    ) -> Result<ChatCompletionResponseStream> {
+        let request = build_request(
+            &self.model,
+            page,
+            opts,
+            SYSTEM_PROMPT,
+            Some(&scheme),
+            Some(ResponseFormat::JsonSchema {
+                json_schema: ResponseFormatJsonSchema {
+                    name: "LlmWeb".to_string(),
+                    description: None,
+                    schema: scheme.clone(),
+                    strict: None,
+                },
+            }),
+            true,
+        )?;
 
-        let response = self
-            .client
-            .exec_chat_stream(&self.model, chat_req, Some(&chat_opts))
+        self.client
+            .chat()
+            .create_stream(request)
             .await
-            .map_err(|e| LlmWebError::ModelClient(format!("{e}")))?;
-
-        Ok(response.stream)
+            .map_err(|e| LlmWebError::ModelClient(format!("{e}")))
     }
 
     /// Generate a JS IIFE that extracts data matching `scheme` from the page.
@@ -108,21 +143,28 @@ impl LLMClient {
             page.content,
         );
 
-        let system = opts.system.as_deref().unwrap_or(CODEGEN_SYSTEM);
-        let chat_req = ChatRequest::new(vec![
-            ChatMessage::system(system),
-            ChatMessage::user(user_text),
-        ]);
+        let request = build_text_request(
+            &self.model,
+            opts,
+            CODEGEN_SYSTEM,
+            user_text,
+            None, // no JsonSpec — output is JS source, not JSON
+        )?;
 
-        // No JsonSpec — we want JS source, not JSON.
-        let chat_opts = base_chat_options(opts);
         let response = self
             .client
-            .exec_chat(&self.model, chat_req, Some(&chat_opts))
+            .chat()
+            .create(request)
             .await
             .map_err(|e| LlmWebError::ModelClient(format!("{e}")))?;
 
-        let text = extract_text(response)?;
+        let text = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .ok_or_else(|| LlmWebError::ModelClient("no content in response".into()))?;
+
         Ok(strip_markdown_backticks!(text))
     }
 
@@ -133,7 +175,7 @@ impl LLMClient {
         scheme: &Value,
         opts: &RunOptions,
     ) -> Result<String> {
-        let recipe_meta_schema = json!({
+        let recipe_meta_schema = serde_json::json!({
             "type": "object",
             "properties": {
                 "container": { "type": ["string", "null"] },
@@ -153,10 +195,6 @@ impl LLMClient {
             "required": ["fields"]
         });
 
-        let chat_opts = base_chat_options(opts).with_response_format(ChatResponseFormat::JsonSpec(
-            JsonSpec::new("LlmWebRecipe", recipe_meta_schema),
-        ));
-
         let user_text = format!(
             "Target schema:\n{}\n\nPage URL: {}\nPage content:\n{}",
             serde_json::to_string_pretty(scheme)?,
@@ -164,72 +202,161 @@ impl LLMClient {
             page.content,
         );
 
-        let system = opts.system.as_deref().unwrap_or(RECIPE_SYSTEM);
-        let chat_req = ChatRequest::new(vec![
-            ChatMessage::system(system),
-            ChatMessage::user(user_text),
-        ]);
+        let request = build_text_request(
+            &self.model,
+            opts,
+            RECIPE_SYSTEM,
+            user_text,
+            Some(ResponseFormat::JsonSchema {
+                json_schema: ResponseFormatJsonSchema {
+                    name: "LlmWebRecipe".to_string(),
+                    description: None,
+                    schema: recipe_meta_schema,
+                    strict: None,
+                },
+            }),
+        )?;
 
         let response = self
             .client
-            .exec_chat(&self.model, chat_req, Some(&chat_opts))
+            .chat()
+            .create(request)
             .await
             .map_err(|e| LlmWebError::ModelClient(format!("{e}")))?;
 
-        let text = extract_text(response)?;
+        let text = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .ok_or_else(|| LlmWebError::ModelClient("no content in response".into()))?;
+
         Ok(strip_markdown_backticks!(text))
     }
 }
 
-/// Build a `ChatOptions` populated with the LLM-related fields of `RunOptions`.
-fn base_chat_options(opts: &RunOptions) -> ChatOptions {
-    let mut co = ChatOptions::default();
+/// Build a chat request for page-based extraction (page content is the user message).
+///
+/// When `schema_for_prompt` is `Some`, the schema is also embedded in the
+/// system prompt as text. Strict gateways (real OpenAI) honour `response_format`;
+/// loose gateways (z.ai, OpenRouter, many proxies) often pass it through as a
+/// hint at best — so the model needs to see the schema directly in the prompt
+/// to reliably produce the right shape.
+fn build_request(
+    model: &str,
+    page: &Preprocessed,
+    opts: &RunOptions,
+    default_system: &str,
+    schema_for_prompt: Option<&Value>,
+    response_format: Option<ResponseFormat>,
+    stream: bool,
+) -> Result<CreateChatCompletionRequest> {
+    let base_system = opts.system.as_deref().unwrap_or(default_system);
+    let system_text = match schema_for_prompt {
+        Some(schema) => format!(
+            "{base_system}\n\nThe response MUST be a single JSON value that strictly matches this JSON Schema:\n{}\n\nReturn ONLY the JSON value. Do not omit wrapper keys. Do not add commentary.",
+            serde_json::to_string_pretty(schema).unwrap_or_default()
+        ),
+        None => base_system.to_string(),
+    };
+    let system_msg = ChatCompletionRequestSystemMessageArgs::default()
+        .content(system_text)
+        .build()
+        .map_err(|e| LlmWebError::ModelClient(format!("build system msg: {e}")))?;
+
+    let user_msg = user_message_for_page(page);
+
+    let mut builder = CreateChatCompletionRequestArgs::default();
+    builder.model(model).messages(vec![system_msg.into(), user_msg.into()]);
+
+    if stream {
+        builder.stream(true);
+    }
+    if let Some(rf) = response_format {
+        builder.response_format(rf);
+    }
     if let Some(t) = opts.temperature {
-        co = co.with_temperature(t);
+        builder.temperature(t as f32);
     }
     if let Some(p) = opts.top_p {
-        co = co.with_top_p(p);
+        builder.top_p(p as f32);
     }
     if let Some(m) = opts.max_tokens {
-        co = co.with_max_tokens(m);
+        builder.max_completion_tokens(m);
     }
-    co
+
+    builder
+        .build()
+        .map_err(|e| LlmWebError::ModelClient(format!("build request: {e}")))
 }
 
-/// Build the system+user `ChatRequest` for a regular extraction. `default_system`
-/// is used when `opts.system` is `None`.
-fn build_request(page: &Preprocessed, opts: &RunOptions, default_system: &str) -> ChatRequest {
-    let system = opts.system.as_deref().unwrap_or(default_system);
-    ChatRequest::new(vec![
-        ChatMessage::system(system),
-        user_message_for_page(page),
-    ])
+/// Build a chat request when the user message is plain text (codegen/recipe).
+fn build_text_request(
+    model: &str,
+    opts: &RunOptions,
+    default_system: &str,
+    user_text: String,
+    response_format: Option<ResponseFormat>,
+) -> Result<CreateChatCompletionRequest> {
+    let system_text = opts.system.as_deref().unwrap_or(default_system);
+    let system_msg = ChatCompletionRequestSystemMessageArgs::default()
+        .content(system_text)
+        .build()
+        .map_err(|e| LlmWebError::ModelClient(format!("build system msg: {e}")))?;
+
+    let user_msg = ChatCompletionRequestUserMessage {
+        content: ChatCompletionRequestUserMessageContent::Text(user_text),
+        name: None,
+    };
+
+    let mut builder = CreateChatCompletionRequestArgs::default();
+    builder.model(model).messages(vec![system_msg.into(), user_msg.into()]);
+
+    if let Some(rf) = response_format {
+        builder.response_format(rf);
+    }
+    if let Some(t) = opts.temperature {
+        builder.temperature(t as f32);
+    }
+    if let Some(p) = opts.top_p {
+        builder.top_p(p as f32);
+    }
+    if let Some(m) = opts.max_tokens {
+        builder.max_completion_tokens(m);
+    }
+
+    builder
+        .build()
+        .map_err(|e| LlmWebError::ModelClient(format!("build request: {e}")))
 }
 
 /// Build a user message from a `Preprocessed`. For image format the content is
-/// sent as a base64 image part; everything else is plain text.
-fn user_message_for_page(page: &Preprocessed) -> ChatMessage {
+/// sent as a base64-encoded `image_url` data URL; everything else is plain text.
+fn user_message_for_page(page: &Preprocessed) -> ChatCompletionRequestUserMessage {
     if page.format == Format::Image {
-        let parts: Vec<ContentPart> = vec![
-            ContentPart::from_text("Extract structured data from the screenshot of the page below."),
-            ContentPart::from_image_base64(page.image_mime(), page.content.clone()),
-        ];
-        ChatMessage::user(MessageContent::from_parts(parts))
+        let text_part = ChatCompletionRequestUserMessageContentPart::Text(
+            ChatCompletionRequestMessageContentPartText {
+                text: "Extract structured data from the screenshot of the page below.".to_string(),
+            },
+        );
+        let image_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
+            ChatCompletionRequestMessageContentPartImage {
+                image_url: ImageUrl {
+                    url: format!("data:{};base64,{}", page.image_mime(), page.content),
+                    detail: None,
+                },
+            },
+        );
+        ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(vec![text_part, image_part]),
+            name: None,
+        }
     } else {
-        ChatMessage::user(page.content.clone())
+        ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Text(page.content.clone()),
+            name: None,
+        }
     }
-}
-
-fn extract_text(response: genai::chat::ChatResponse) -> Result<String> {
-    let json_str = response
-        .content
-        .ok_or_else(|| LlmWebError::ModelClient("No content in response".to_string()))?
-        .text_into_string();
-
-    if let Some(json_str) = json_str {
-        return Ok(strip_markdown_backticks!(json_str));
-    }
-    Err(LlmWebError::ModelClient("Content to string error".to_string()))
 }
 
 #[cfg(test)]
