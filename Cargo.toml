@@ -9,7 +9,7 @@ readme = "README.md"
 keywords = ["llm", "web", "scraper"]
 
 [[bin]]
-name = "llmweb-cli"
+name = "llmweb"
 path = "src/main.rs"
 
 [dependencies]
@@ -21,3 +21,8 @@ serde = { version = "1.0", features = ["derive"] }
 regex = "1.0"
 thiserror = "2"
 clap = { version = "4.0", features = ["derive"] }
+htmd = "0.5"
+scraper = "0.27"
+base64 = "0.22"
+futures = "0.3"
+async-stream = "0.3"

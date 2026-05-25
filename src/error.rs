@@ -22,6 +22,15 @@ pub enum LlmWebError {
     /// An JsBlocked error.
     #[error("JsBlocked error")]
     JsBlocked,
+
+    /// An error during HTML preprocessing (markdown conversion, etc.).
+    #[error("Preprocess error: {0}")]
+    Preprocess(String),
+
+    /// An error while applying an extraction recipe (invalid CSS selector,
+    /// missing required field, parse failure).
+    #[error("Recipe error: {0}")]
+    Recipe(String),
 }
 
 /// A specialized `Result` type for `llmweb` operations.

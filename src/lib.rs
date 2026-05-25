@@ -1,156 +1,78 @@
-//! # llmweb.rs
-//! **Powering the Web with Rust & LLMs**
+//! # llmweb
 //!
-//! `llmweb` is a Rust library designed to seamlessly integrate Large Language Models (LLMs)
-//! with web content. It allows you to fetch a webpage, extract its content, and then
-//! use an LLM to get structured data from it based on a provided schema.
+//! Extract structured data from any webpage by combining a headless browser
+//! with an LLM. Aligned with the TypeScript [`llm-scraper`] library:
 //!
-//! ## Features
-//! - 🚀 Seamless integration with major LLM APIs.
-//! - ✨ Automatic structured data extraction from web content.
-//! - 🔧 Schema-first approach for precise data formatting using `serde_json::Value`.
-//! - ⚡ Async-first design for high performance.
+//! - 5 preprocessing modes: `Html` (cleaned), `RawHtml`, `Markdown`, `Text`, `Image`.
+//! - Code generation (route A): the LLM emits a JS extractor that runs in the
+//!   browser via `tab.evaluate` — store it, replay it without further LLM cost.
+//! - Selector recipe (route B): the LLM emits a declarative CSS-selector
+//!   recipe, executed in pure Rust against any HTML.
 //!
-//! ## Example
-//!
-//! Here's a quick example of how to use `llmweb` to extract stories from Hacker News:
-//!
-//! ```rust,no_run
-//! use llmweb::{LlmWeb, error::LlmWebError};
-//! use serde::{Deserialize, Serialize};
-//! use serde_json::json;
-//!
-//! #[derive(Debug, Serialize, Deserialize)]
-//! struct Story {
-//!     title: String,
-//!     points: f32,
-//!     by: Option<String>,
-//!     comments_url: Option<String>,
-//! }
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), LlmWebError> {
-//!     // 1. Define the schema for the data you want to extract.
-//!     let schema_json = json!({
-//!         "type": "array",
-//!         "items": {
-//!             "type": "object",
-//!             "properties": {
-//!                 "by": { "type": "string" },
-//!                 "comments_url": { "type": "string" },
-//!                 "points": { "type": "number" },
-//!                 "title": { "type": "string" }
-//!             },
-//!             "required": ["by", "comments_url", "points", "title"]
-//!         }
-//!     });
-//!
-//!     // 2. Create an LlmWeb instance with the desired model.
-//!     //    Make sure you have the GEMINI_API_KEY environment variable set.
-//!     let llmweb = LlmWeb::new("gemini-1.5-flash");
-//!
-//!     // 3. Call completion with the URL and schema.
-//!     let structured_value: Vec<Story> = llmweb
-//!         .completion("https://news.ycombinator.com", schema_json)
-//!         .await?;
-//!
-//!     // 4. Print the result.
-//!     println!("{:#?}", structured_value);
-//!
-//!     Ok(())
-//! }
-//! ```
+//! [`llm-scraper`]: https://github.com/mishushakov/llm-scraper
+
 use {
     crate::{browser::LlmWebBrower, error::Result},
     serde::de::DeserializeOwned,
-    std::fmt::Debug,
+    std::{fmt::Debug, sync::Arc},
 };
 
 mod browser;
+mod codegen;
 pub mod error;
 mod models;
+pub mod preprocess;
+pub mod recipe;
+pub mod streaming;
 
-/// Represents the desired output format.
-///
-/// Note: This is currently not used but is planned for future versions.
-#[derive(Debug, Clone)]
-pub enum LlmWebFormat {
-    /// JSON format.
-    Json,
-    /// YAML format.
-    Yaml,
-    /// Plain text format.
-    Text,
-}
+pub use preprocess::{Format, Preprocessed, RunOptions};
+pub use recipe::{ExtractRecipe, FieldRule};
+pub use streaming::PartialStream;
 
-/// The main struct for interacting with web pages and LLMs.
-///
-/// It holds the client for the LLM and provides methods to
-/// perform completions on web content.
+/// The main client.
 pub struct LlmWeb {
     client: models::LLMClient,
 }
 
 impl LlmWeb {
-    /// Creates a new `LlmWeb` instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The name of the LLM model to use (e.g., "gemini-1.5-flash").
+    /// Create a new client for a given model name (e.g. `"gemini-2.0-flash"`,
+    /// `"gpt-4o"`, `"claude-3-5-sonnet"`). Provider routing is delegated to `genai`.
     pub fn new(name: &str) -> Self {
         Self {
             client: models::LLMClient::new(name),
         }
     }
 
-    /// Fetches content from a URL, sends it to an LLM for processing based on a schema,
-    /// and returns the structured data.
-    ///
-    /// This function performs the following steps:
-    /// 1. Launches a headless browser.
-    /// 2. Navigates to the specified URL.
-    /// 3. Extracts the HTML content of the page.
-    /// 4. Sends the content and a JSON schema to the configured LLM.
-    /// 5. Parses the LLM's JSON response into the specified Rust type `R`.
-    ///
-    /// # Arguments
-    ///
-    /// * `url` - The URL of the web page to process.
-    /// * `scheme` - A serializable object representing the JSON schema for data extraction.
-    ///   This is typically a `serde_json::Value`.
-    ///
-    /// # Errors
-    ///
-    /// This function can return an `LlmWebError` if any of the steps fail, such as
-    /// browser errors, network issues, LLM API errors, or JSON deserialization errors.
+    // ------------------------------------------------------------------
+    // High-level: URL-based, library owns the browser.
+    // ------------------------------------------------------------------
+
+    /// One-shot extraction with default preprocessing (cleaned HTML).
     pub async fn exec<R>(&self, url: &str, scheme: serde_json::Value) -> Result<R>
     where
         R: DeserializeOwned + Debug,
     {
-        let browser = LlmWebBrower::new().await?;
-        let html = browser.run(url).await?;
-        let response = self.client.completion(&html, scheme).await?;
-
-        // The `?` operator is used here thanks to `#[from] serde_json::Error` on LlmWebError.
-        let result: R = serde_json::from_str(&response)?;
-
-        Ok(result)
+        self.exec_with(url, scheme, RunOptions::default()).await
     }
 
-    /// A convenience method that accepts a schema as a string slice.
-    ///
-    /// This method is useful when loading a schema from a file. It parses the
-    /// string into a `serde_json::Value` and then calls the main `completion` method.
-    ///
-    /// # Arguments
-    ///
-    /// * `url` - The URL of the web page to process.
-    /// * `schema_str` - A string slice containing the JSON schema.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the `schema_str` is not valid JSON, or if any of the
-    /// underlying operations in `completion` fail.
+    /// One-shot extraction with explicit options (e.g. format).
+    pub async fn exec_with<R>(
+        &self,
+        url: &str,
+        scheme: serde_json::Value,
+        opts: RunOptions,
+    ) -> Result<R>
+    where
+        R: DeserializeOwned + Debug,
+    {
+        let browser = LlmWebBrower::new().await?;
+        let tab = browser.open(url).await?;
+        let page = preprocess::preprocess(&tab, opts.format).await?;
+        let response = self.client.completion(&page, scheme).await?;
+        Ok(serde_json::from_str(&response)?)
+    }
+
+    /// Convenience wrapper that parses a schema string for you.
     pub async fn exec_from_schema_str<R>(&self, url: &str, schema_str: &str) -> Result<R>
     where
         R: DeserializeOwned + Debug,
@@ -159,38 +81,125 @@ impl LlmWeb {
         self.exec(url, scheme).await
     }
 
-    /// Fetches content from a URL, sends it to an LLM for processing based on a schema,
-    /// and returns the structured data.
+    /// Real incremental streaming. Returns a `Stream<Item = Result<R>>` that
+    /// yields progressively more-complete partial values as the LLM emits
+    /// tokens. Duplicate consecutive snapshots are filtered.
     ///
-    /// This function performs the following steps:
-    /// 1. Launches a headless browser.
-    /// 2. Navigates to the specified URL.
-    /// 3. Extracts the HTML content of the page.
-    /// 4. Sends the content and a JSON schema to the configured LLM.
-    /// 5. Parses the LLM's JSON response into the specified Rust type `R`.
-    ///
-    /// This method is intended for streaming responses.
-    ///
-    /// # Arguments
-    ///
-    /// * `url` - The URL of the web page to process.
-    /// * `scheme` - A serializable object representing the JSON schema for data extraction.
-    ///   This is typically a `serde_json::Value`.
-    ///
-    /// # Errors
-    ///
-    /// This function can return an `LlmWebError` if any of the steps fail, such as
-    /// browser errors, network issues, LLM API errors, or JSON deserialization errors.
-    pub async fn stream<R>(&self, url: &str, scheme: serde_json::Value) -> Result<R>
+    /// For `R` with non-`Option` fields, early ticks will fail to parse and
+    /// be skipped — you'll only see emissions once enough required fields
+    /// have streamed in. Use `serde_json::Value` or an all-`Option` struct
+    /// to receive every tick.
+    pub async fn stream<R>(
+        &self,
+        url: &str,
+        scheme: serde_json::Value,
+    ) -> Result<PartialStream<R>>
+    where
+        R: DeserializeOwned + Debug + Send + 'static + PartialEq,
+    {
+        self.stream_with(url, scheme, RunOptions::default()).await
+    }
+
+    pub async fn stream_with<R>(
+        &self,
+        url: &str,
+        scheme: serde_json::Value,
+        opts: RunOptions,
+    ) -> Result<PartialStream<R>>
+    where
+        R: DeserializeOwned + Debug + Send + 'static + PartialEq,
+    {
+        let browser = LlmWebBrower::new().await?;
+        let tab = browser.open(url).await?;
+        let page = preprocess::preprocess(&tab, opts.format).await?;
+        let chat = self.client.completion_stream(&page, scheme).await?;
+        Ok(streaming::partial_stream::<R>(chat))
+    }
+
+    // ------------------------------------------------------------------
+    // Route A — JS code generation.
+    // ------------------------------------------------------------------
+
+    /// Ask the LLM to produce a JS IIFE that extracts data matching `scheme`
+    /// from the page. The returned string can be persisted and replayed via
+    /// [`LlmWeb::run_script`] with no further LLM call.
+    pub async fn generate(&self, url: &str, scheme: serde_json::Value) -> Result<String> {
+        self.generate_with(url, scheme, RunOptions::default()).await
+    }
+
+    pub async fn generate_with(
+        &self,
+        url: &str,
+        scheme: serde_json::Value,
+        opts: RunOptions,
+    ) -> Result<String> {
+        let browser = LlmWebBrower::new().await?;
+        let tab = browser.open(url).await?;
+        let page = preprocess::preprocess(&tab, opts.format).await?;
+        self.client.generate_extractor_js(&page, &scheme).await
+    }
+
+    /// Execute a previously-generated JS extractor against `url`. No LLM call.
+    pub async fn run_script<R>(&self, url: &str, js: &str) -> Result<R>
     where
         R: DeserializeOwned + Debug,
     {
         let browser = LlmWebBrower::new().await?;
-        let html = browser.run(url).await?;
-        let response = self.client.completion_stream(&html, scheme).await?;
-
-        let result: R = serde_json::from_str(&response)?;
-
-        Ok(result)
+        let tab = browser.open(url).await?;
+        run_script_on_tab(&tab, js).await
     }
+
+    // ------------------------------------------------------------------
+    // Route B — selector recipe.
+    // ------------------------------------------------------------------
+
+    /// Ask the LLM to produce a declarative selector recipe (route B). Cheaper
+    /// to store and replay than [`generate`], at the cost of expressiveness.
+    pub async fn generate_recipe(
+        &self,
+        url: &str,
+        scheme: serde_json::Value,
+    ) -> Result<ExtractRecipe> {
+        self.generate_recipe_with(url, scheme, RunOptions::default()).await
+    }
+
+    pub async fn generate_recipe_with(
+        &self,
+        url: &str,
+        scheme: serde_json::Value,
+        opts: RunOptions,
+    ) -> Result<ExtractRecipe> {
+        let browser = LlmWebBrower::new().await?;
+        let tab = browser.open(url).await?;
+        let page = preprocess::preprocess(&tab, opts.format).await?;
+        let json = self.client.generate_recipe_json(&page, &scheme).await?;
+        ExtractRecipe::from_json(&json)
+    }
+
+    /// Execute a recipe against a fresh fetch of `url`. The recipe runs in
+    /// pure Rust (no browser navigation past the initial load, no LLM).
+    pub async fn run_recipe<R>(&self, url: &str, recipe: &ExtractRecipe) -> Result<R>
+    where
+        R: DeserializeOwned + Debug,
+    {
+        let browser = LlmWebBrower::new().await?;
+        let tab = browser.open(url).await?;
+        // Use raw HTML for recipe matching — cleanup would remove attributes
+        // (href, src, etc.) the recipe depends on.
+        let page = preprocess::preprocess(&tab, Format::RawHtml).await?;
+        let value = recipe.apply(&page.content)?;
+        Ok(serde_json::from_value(value)?)
+    }
+}
+
+/// Re-export of the low-level helper for advanced users who manage their own
+/// browser/tab lifecycle (e.g. to log in, scroll, or interact before extraction).
+pub async fn run_script_on_tab<R>(
+    tab: &Arc<headless_chrome::Tab>,
+    js: &str,
+) -> Result<R>
+where
+    R: DeserializeOwned + Debug,
+{
+    codegen::run_script_on_tab(tab, js).await
 }
