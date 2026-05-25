@@ -1,12 +1,15 @@
 [package]
 name = "llmweb"
-version = "0.1.7"
+version = "0.2.0"
 edition = "2024"
-description = "Webpage to structured data in Rust & LLM"
+description = "Extract any webpage to structured data with headless Chrome + LLM"
 license = "MIT"
 repository = "https://github.com/zTgx/llmweb"
+homepage = "https://github.com/zTgx/llmweb"
+documentation = "https://docs.rs/llmweb"
 readme = "README.md"
-keywords = ["llm", "web", "scraper"]
+keywords = ["llm", "web", "scraper", "extraction", "openai"]
+categories = ["web-programming", "parsing", "command-line-utilities"]
 
 [[bin]]
 name = "llmweb"
