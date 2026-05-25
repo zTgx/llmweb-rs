@@ -18,20 +18,6 @@
 llmweb = "0.2"
 ```
 
-Default config reads `OPENAI_API_KEY`. For any OpenAI-compatible gateway
-(DeepSeek, Groq, OpenRouter, z.ai, vLLM, Ollama, ...) use `LlmWeb::with_client`:
-
-```rust
-use llmweb::{LlmWeb, openai::{Client, OpenAIConfig}};
-
-let client = Client::with_config(
-    OpenAIConfig::new()
-        .with_api_base("https://api.deepseek.com/v1")
-        .with_api_key("sk-..."),
-);
-let llmweb = LlmWeb::with_client(client, "deepseek-chat");
-```
-
 ## Example
 
 ```rust
@@ -104,8 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 URL-based shortcut (library opens the tab for you): `llmweb.exec(url, schema).await?`.
 
-<details>
-<summary>Sample output</summary>
+## Sample output
 
 ```
 Query: rust programming language
@@ -128,8 +113,6 @@ Query: rust programming language
 
 ... (10 results total)
 ```
-
-</details>
 
 ## Features
 
