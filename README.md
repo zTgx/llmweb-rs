@@ -86,6 +86,64 @@ cargo run --bin llmweb -- \
   https://news.ycombinator.com
 ```
 
+### Custom model / endpoint / API key
+
+Build a `genai::Client` with a `ServiceTargetResolver` and pass it in:
+
+```rust
+use llmweb::{LlmWeb, genai::{
+    AdapterKind, AuthData, Client, Endpoint, ModelIden, ServiceTarget, ServiceTargetResolver,
+}};
+
+let resolver = ServiceTargetResolver::from_resolver_fn(
+    |t: ServiceTarget| -> Result<ServiceTarget, ::genai::resolver::Error> {
+        Ok(ServiceTarget {
+            endpoint: Endpoint::from_static("https://api.my-llm.com/v1/"),
+            auth:     AuthData::from_single("sk-my-key"),
+            model:    ModelIden::new(AdapterKind::OpenAI, t.model.model_name),
+        })
+    },
+);
+let client = Client::builder().with_service_target_resolver(resolver).build();
+let llmweb = LlmWeb::with_client(client, "my-model-name");
+```
+
+`AdapterKind` chooses the wire protocol (`OpenAI`, `Anthropic`, `Gemini`, ...). Any OpenAI-compatible gateway works with `AdapterKind::OpenAI`.
+
+### Page-based usage (login, scroll, etc.)
+
+For sites that need interaction before extraction, drive the browser yourself and call the `*_on_tab` variants:
+
+```rust
+use llmweb::{Browser, LlmWeb, RunOptions};
+
+let browser = Browser::new().await?;
+let tab = browser.open("https://example.com/login").await?;
+tab.find_element("input[name=email]")?.click()?.type_into("me@example.com")?;
+tab.find_element("input[name=password]")?.click()?.type_into("...")?;
+tab.find_element("button[type=submit]")?.click()?;
+tab.wait_until_navigated()?;
+
+let stories: Vec<Story> = LlmWeb::new("gemini-2.0-flash")
+    .exec_on_tab(&tab, schema, RunOptions::default())
+    .await?;
+```
+
+### Tuning the LLM call
+
+`RunOptions` exposes the common knobs:
+
+```rust
+let opts = llmweb::RunOptions {
+    format: llmweb::Format::Markdown,
+    temperature: Some(0.0),
+    max_tokens: Some(2048),
+    system: Some("You are a careful extractor. Prefer null over guesses.".into()),
+    ..Default::default()
+};
+let result: Vec<Story> = llmweb.exec_with(url, schema, opts).await?;
+```
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=zTgx/llmweb&type=Date)](https://www.star-history.com/#zTgx/llmweb&Date)

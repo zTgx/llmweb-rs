@@ -1,8 +1,7 @@
-//! Page preprocessing — porting `llm-scraper/src/preprocess.ts` and `cleanup.ts`.
+//! Page preprocessing.
 //!
-//! Five format modes are supported (aligned with the TS upstream; the `custom`
-//! mode is omitted because Rust closure ergonomics make it awkward — call
-//! `evaluate_json` yourself if you need that):
+//! Five format modes are supported. For a `custom` mode, call `evaluate_json`
+//! yourself against the tab.
 //!
 //! - [`Format::Html`]      — run an in-browser cleanup pass, then take the
 //!   serialized DOM (default).
@@ -31,15 +30,37 @@ pub enum Format {
     Image,
 }
 
-/// Options passed to high-level `LlmWeb` methods.
+/// Options passed to high-level `LlmWeb` methods. All fields are optional;
+/// use struct-update syntax to set only what you need:
+///
+/// ```ignore
+/// RunOptions {
+///     format: Format::Markdown,
+///     temperature: Some(0.0),
+///     ..Default::default()
+/// }
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     pub format: Format,
+    /// Override the default system prompt. None = use the built-in prompt
+    /// appropriate to the method (`SYSTEM_PROMPT` / `CODEGEN_SYSTEM` / `RECIPE_SYSTEM`).
+    pub system: Option<String>,
+    /// 0.0 = deterministic, higher = more random.
+    pub temperature: Option<f64>,
+    /// Nucleus-sampling threshold.
+    pub top_p: Option<f64>,
+    /// Hard cap on output tokens.
+    pub max_tokens: Option<u32>,
 }
 
 impl RunOptions {
+    /// Shorthand for `RunOptions { format, ..Default::default() }`.
     pub fn new(format: Format) -> Self {
-        Self { format }
+        Self {
+            format,
+            ..Default::default()
+        }
     }
 }
 
@@ -58,8 +79,8 @@ impl Preprocessed {
     }
 }
 
-/// Port of `llm-scraper/src/cleanup.ts`. Strips heavy non-content tags and
-/// noisy attributes in the live DOM before serialization.
+/// Strips heavy non-content tags and noisy attributes in the live DOM
+/// before serialization.
 const CLEANUP_JS: &str = r#"
 (() => {
   const elementsToRemove = ['script','style','noscript','iframe','svg','img','audio','video','canvas','map','source','dialog','menu','menuitem','track','object','embed','form','input','button','select','textarea','label','option','optgroup','aside','footer','header','nav','head'];

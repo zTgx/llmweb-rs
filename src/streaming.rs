@@ -2,8 +2,7 @@
 //!
 //! `genai` emits raw text chunks as the LLM generates tokens. This module
 //! turns that token stream into a `Stream<Item = Result<R>>` of progressively
-//! more-complete parsed values — equivalent to Vercel AI SDK's
-//! `partialOutputStream` used by `llm-scraper`'s `scraper.stream()`.
+//! more-complete parsed values.
 //!
 //! The trick is "repairing" the partial JSON buffer at each tick:
 //! - close any open string,

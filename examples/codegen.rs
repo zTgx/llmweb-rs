@@ -1,7 +1,5 @@
 //! Route A: ask the LLM to produce a JS extractor once, then replay it
 //! against the live page with zero LLM calls.
-//!
-//! Mirrors `llm-scraper/examples/codegen.ts`.
 
 use llmweb::LlmWeb;
 use serde::{Deserialize, Serialize};

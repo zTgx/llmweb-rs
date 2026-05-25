@@ -1,7 +1,7 @@
 use {
     crate::{
         error::{LlmWebError, Result},
-        preprocess::{Format, Preprocessed},
+        preprocess::{Format, Preprocessed, RunOptions},
     },
     genai::{
         Client,
@@ -44,21 +44,28 @@ impl LLMClient {
         }
     }
 
-    /// One-shot JSON extraction. Accepts a `Preprocessed` so the caller can
-    /// choose how the page was rendered (html / markdown / image / ...).
-    pub async fn completion(&self, page: &Preprocessed, scheme: Value) -> Result<String> {
-        let op = ChatOptions::default().with_response_format(ChatResponseFormat::JsonSpec(
+    pub fn with_client(client: Client, model: &str) -> Self {
+        Self {
+            client,
+            model: model.to_string(),
+        }
+    }
+
+    /// One-shot JSON extraction.
+    pub async fn completion(
+        &self,
+        page: &Preprocessed,
+        scheme: Value,
+        opts: &RunOptions,
+    ) -> Result<String> {
+        let chat_opts = base_chat_options(opts).with_response_format(ChatResponseFormat::JsonSpec(
             JsonSpec::new("LlmWeb", json!(scheme)),
         ));
-
-        let chat_req = ChatRequest::new(vec![
-            ChatMessage::system(SYSTEM_PROMPT),
-            user_message_for_page(page),
-        ]);
+        let chat_req = build_request(page, opts, SYSTEM_PROMPT);
 
         let response = self
             .client
-            .exec_chat(&self.model, chat_req, Some(&op))
+            .exec_chat(&self.model, chat_req, Some(&chat_opts))
             .await
             .map_err(|e| LlmWebError::ModelClient(format!("{e}")))?;
 
@@ -67,20 +74,20 @@ impl LLMClient {
 
     /// Open a streaming chat that returns text chunks. The caller is
     /// responsible for accumulating + (partially) parsing the chunks.
-    /// See `crate::streaming` for the standard partial-JSON consumer.
-    pub async fn completion_stream(&self, page: &Preprocessed, scheme: Value) -> Result<ChatStream> {
-        let op = ChatOptions::default().with_response_format(ChatResponseFormat::JsonSpec(
+    pub async fn completion_stream(
+        &self,
+        page: &Preprocessed,
+        scheme: Value,
+        opts: &RunOptions,
+    ) -> Result<ChatStream> {
+        let chat_opts = base_chat_options(opts).with_response_format(ChatResponseFormat::JsonSpec(
             JsonSpec::new("LlmWeb", json!(scheme)),
         ));
-
-        let chat_req = ChatRequest::new(vec![
-            ChatMessage::system(SYSTEM_PROMPT),
-            user_message_for_page(page),
-        ]);
+        let chat_req = build_request(page, opts, SYSTEM_PROMPT);
 
         let response = self
             .client
-            .exec_chat_stream(&self.model, chat_req, Some(&op))
+            .exec_chat_stream(&self.model, chat_req, Some(&chat_opts))
             .await
             .map_err(|e| LlmWebError::ModelClient(format!("{e}")))?;
 
@@ -88,8 +95,12 @@ impl LLMClient {
     }
 
     /// Generate a JS IIFE that extracts data matching `scheme` from the page.
-    /// Returned string is raw JavaScript, ready to feed into `tab.evaluate`.
-    pub async fn generate_extractor_js(&self, page: &Preprocessed, scheme: &Value) -> Result<String> {
+    pub async fn generate_extractor_js(
+        &self,
+        page: &Preprocessed,
+        scheme: &Value,
+        opts: &RunOptions,
+    ) -> Result<String> {
         let user_text = format!(
             "Target schema:\n{}\n\nPage URL: {}\nPage content (for reference; your code will run against the LIVE DOM, not this snapshot):\n{}",
             serde_json::to_string_pretty(scheme)?,
@@ -97,15 +108,17 @@ impl LLMClient {
             page.content,
         );
 
+        let system = opts.system.as_deref().unwrap_or(CODEGEN_SYSTEM);
         let chat_req = ChatRequest::new(vec![
-            ChatMessage::system(CODEGEN_SYSTEM),
+            ChatMessage::system(system),
             ChatMessage::user(user_text),
         ]);
 
         // No JsonSpec — we want JS source, not JSON.
+        let chat_opts = base_chat_options(opts);
         let response = self
             .client
-            .exec_chat(&self.model, chat_req, None)
+            .exec_chat(&self.model, chat_req, Some(&chat_opts))
             .await
             .map_err(|e| LlmWebError::ModelClient(format!("{e}")))?;
 
@@ -113,9 +126,13 @@ impl LLMClient {
         Ok(strip_markdown_backticks!(text))
     }
 
-    /// Generate a selector recipe (route B). Output is a JSON object describing
-    /// CSS selectors per field; see [`crate::recipe::ExtractRecipe`].
-    pub async fn generate_recipe_json(&self, page: &Preprocessed, scheme: &Value) -> Result<String> {
+    /// Generate a selector recipe (route B).
+    pub async fn generate_recipe_json(
+        &self,
+        page: &Preprocessed,
+        scheme: &Value,
+        opts: &RunOptions,
+    ) -> Result<String> {
         let recipe_meta_schema = json!({
             "type": "object",
             "properties": {
@@ -136,7 +153,7 @@ impl LLMClient {
             "required": ["fields"]
         });
 
-        let op = ChatOptions::default().with_response_format(ChatResponseFormat::JsonSpec(
+        let chat_opts = base_chat_options(opts).with_response_format(ChatResponseFormat::JsonSpec(
             JsonSpec::new("LlmWebRecipe", recipe_meta_schema),
         ));
 
@@ -147,20 +164,46 @@ impl LLMClient {
             page.content,
         );
 
+        let system = opts.system.as_deref().unwrap_or(RECIPE_SYSTEM);
         let chat_req = ChatRequest::new(vec![
-            ChatMessage::system(RECIPE_SYSTEM),
+            ChatMessage::system(system),
             ChatMessage::user(user_text),
         ]);
 
         let response = self
             .client
-            .exec_chat(&self.model, chat_req, Some(&op))
+            .exec_chat(&self.model, chat_req, Some(&chat_opts))
             .await
             .map_err(|e| LlmWebError::ModelClient(format!("{e}")))?;
 
         let text = extract_text(response)?;
         Ok(strip_markdown_backticks!(text))
     }
+}
+
+/// Build a `ChatOptions` populated with the LLM-related fields of `RunOptions`.
+fn base_chat_options(opts: &RunOptions) -> ChatOptions {
+    let mut co = ChatOptions::default();
+    if let Some(t) = opts.temperature {
+        co = co.with_temperature(t);
+    }
+    if let Some(p) = opts.top_p {
+        co = co.with_top_p(p);
+    }
+    if let Some(m) = opts.max_tokens {
+        co = co.with_max_tokens(m);
+    }
+    co
+}
+
+/// Build the system+user `ChatRequest` for a regular extraction. `default_system`
+/// is used when `opts.system` is `None`.
+fn build_request(page: &Preprocessed, opts: &RunOptions, default_system: &str) -> ChatRequest {
+    let system = opts.system.as_deref().unwrap_or(default_system);
+    ChatRequest::new(vec![
+        ChatMessage::system(system),
+        user_message_for_page(page),
+    ])
 }
 
 /// Build a user message from a `Preprocessed`. For image format the content is

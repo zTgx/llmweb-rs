@@ -1,8 +1,6 @@
 //! Route A — let the LLM generate a JavaScript extractor (IIFE) that runs in
 //! the browser via `tab.evaluate`. The output is a plain `String` you can
 //! persist to disk and replay without any LLM round-trip.
-//!
-//! Mirrors `llm-scraper`'s `scraper.generate()` + `page.evaluate(code)` flow.
 
 use {
     crate::{

@@ -6,12 +6,10 @@ use {
 
 /// Thin wrapper around a `headless_chrome::Browser` configured with stealth flags.
 ///
-/// The previous version of this struct held a single hidden tab and only let
-/// callers fetch HTML by URL. To align with `llm-scraper`'s `Page`-based model,
-/// the wrapper now exposes the underlying [`Browser`] and a helper to open a
-/// new tab navigated to a URL. Higher-level code in `lib.rs` and `preprocess.rs`
-/// works on a `Tab` so that callers (or library code) can drive the page
-/// however they want before extraction.
+/// Exposes the underlying [`Browser`] plus a convenience [`Self::open`] that
+/// returns an `Arc<Tab>` already navigated to the given URL. Callers can also
+/// drive the tab themselves (login, scroll, etc.) before handing it to a
+/// `*_on_tab` extraction method.
 pub struct LlmWebBrower {
     pub browser: Browser,
 }
