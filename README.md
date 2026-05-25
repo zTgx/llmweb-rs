@@ -15,7 +15,7 @@
 
 ```toml
 [dependencies]
-llmweb = "0.1"
+llmweb = "0.2"
 ```
 
 Default config reads `OPENAI_API_KEY`. For any OpenAI-compatible gateway
